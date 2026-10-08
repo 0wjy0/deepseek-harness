@@ -1,0 +1,82 @@
+# Attach Linux Desktop packages to a GitHub release.
+#
+# Dispatch-only: a maintainer names the build run whose artifacts to publish, so this workflow
+# never competes with the packaging workflow that produced them and is never a PR check.
+# It downloads that run's artifacts, writes a SHA256SUMS.txt beside them, and creates the
+# release. The client's baked-in app-update.yml points at a placeholder origin, so a GitHub
+# release is a distribution and backup channel rather than an update channel.
+name: Release Desktop (Linux)
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Build run ID whose artifacts to attach (the `desktop-build-linux` run).
+        required: true
+        type: string
+      version:
+        description: Release tag to create, for example v0.2.1-alpha.1.
+        required: true
+        type: string
+      prerelease:
+        description: Publish the release as a prerelease.
+        required: true
+        type: boolean
+        default: true
+
+# Creating a release needs contents: write; the default GITHUB_TOKEN is read-only. Reading
+# artifacts from another run needs actions: read.
+permissions:
+  contents: write
+  actions: read
+
+env:
+  DSH_TELEMETRY_DISABLED: '1'
+
+jobs:
+  release:
+    name: Create the GitHub release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Download the build run's artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: deepseek-harness-linux-*
+          path: release-assets
+          merge-multiple: true
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ github.token }}
+
+      # A checksum file lets someone verify a mirror against this release without trusting
+      # either the mirror or GitHub. `sha256sum -- *` runs after download-artifact has flattened
+      # both architectures into one directory, so the file lists every attached package.
+      - name: Write SHA256SUMS.txt
+        run: |
+          set -euo pipefail
+          ls -l release-assets
+          ( cd release-assets && sha256sum -- * > SHA256SUMS.txt )
+          cat release-assets/SHA256SUMS.txt
+
+      - name: Create the GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.version }}
+          name: ${{ inputs.version }} (Linux)
+          prerelease: ${{ inputs.prerelease }}
+          fail_on_unmatched_files: true
+          files: release-assets/*
+          body: |
+            DeepSeek Harness 桌面版 Linux 安装包（AppImage，x64 与 arm64）。
+
+            **自动更新**：本 fork 内置的更新源是占位地址（`.invalid` 域，不可达），不会自动更新；本 Release 只用于分发与备份。
+
+            **安装方式**：`chmod +x *.AppImage && ./<文件名>`。
+
+            **架构选择**：x64 用于常规 PC / 服务器；arm64 用于飞腾、鲲鹏、ARM 虚拟机等机型。
+
+            附 `SHA256SUMS.txt` 用于校验镜像完整性。

@@ -1,0 +1,126 @@
+# Package the Linux Desktop application (AppImage, x64 + arm64).
+#
+# The fork this branch is built on packages macOS and Windows only; this workflow owns the
+# Linux packaging path and runs only when a maintainer dispatches it. Two jobs, each with one
+# responsibility:
+#
+#   check   - validate the packaging configuration and toolchain on ubuntu-24.04
+#   package - build one architecture per matrix leg and smoke the AppImage it produced
+#
+# Linux builds carry no code-signing stage and never ship the mandatory-update policy. Only
+# AppImage is produced: it is the auto-update carrier this fork supports.
+name: Desktop (Linux)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PRIMARY_NODE_VERSION: '24'
+  # CI runs must never report to the production telemetry endpoint baked into apps/cli/cordis.yml.
+  DSH_TELEMETRY_DISABLED: '1'
+
+jobs:
+  check:
+    name: Validate Linux packaging configuration
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          clean: true
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.PRIMARY_NODE_VERSION }}
+          package-manager-cache: false
+
+      - name: Enable pnpm
+        run: corepack enable pnpm
+
+      - name: Install (immutable)
+        run: pnpm install --frozen-lockfile
+
+      - uses: ./.github/actions/prepare-linux-env
+
+      # The preflight in check:package probes FUSE 2.
+      - name: Install AppImage build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libfuse2
+
+      - name: Validate packaging configuration and toolchain
+        run: pnpm --dir apps/desktop run check:package
+
+  package:
+    name: Package Linux ${{ matrix.arch }} (AppImage)
+    runs-on: ${{ matrix.runs-on }}
+    needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Native runners: cross-building arm64 on x64 hosts risks silently unusable native modules.
+          - arch: x64
+            runs-on: ubuntu-24.04
+          - arch: arm64
+            runs-on: ubuntu-24.04-arm
+    steps:
+      # Complete history: the release scripts read tags.
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          clean: true
+
+      - name: Configure runner-private caches
+        run: |
+          echo "NODE_COMPILE_CACHE=${{ runner.temp }}/node-compile-cache" >> "$GITHUB_ENV"
+          echo "npm_config_devdir=${{ runner.temp }}/node-gyp" >> "$GITHUB_ENV"
+          echo "TMPDIR=${{ runner.temp }}" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.PRIMARY_NODE_VERSION }}
+          package-manager-cache: false
+
+      - name: Enable pnpm
+        run: corepack enable pnpm
+
+      - name: Install (immutable)
+        run: pnpm install --frozen-lockfile
+
+      # electron-builder's AppImage tool requires FUSE2 at build time on Ubuntu 24.04 runners.
+      - name: Install AppImage build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libfuse2
+
+      - uses: ./.github/actions/prepare-linux-env
+
+      - name: Package Linux ${{ matrix.arch }} (AppImage)
+        run: pnpm --dir apps/desktop run package:linux:${{ matrix.arch }}
+
+      # One artifact per architecture holding exactly what a release needs. The upload globs name
+      # only the AppImage, its channel metadata, and the completion record, so the multi-hundred-
+      # megabyte linux-unpacked debug tree beside them is never collected.
+      - name: Upload packaged artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: deepseek-harness-linux-${{ matrix.arch }}
+          path: |
+            apps/desktop/.desktop-build/targets/linux-${{ matrix.arch }}/artifacts/*.AppImage
+            apps/desktop/.desktop-build/targets/linux-${{ matrix.arch }}/artifacts/*.yml
+            apps/desktop/.desktop-build/targets/linux-${{ matrix.arch }}/artifacts/*-release.json
+          if-no-files-found: error
+          retention-days: 14
+
+      # The gate between "a file was produced" and "a file may be published". Packaging validates
+      # its configuration and writes well-formed AppImages, and neither of those says anything
+      # about whether the application runs: a build carrying the mandatory-update policy passes
+      # both and then opens the fatal startup dialog on every machine. Launching the build here
+      # turns that class of mistake into a red job.
+      - name: Smoke-test the packaged ${{ matrix.arch }} AppImage
+        uses: ./.github/actions/smoke-linux-appimage
+        with:
+          directory: apps/desktop/.desktop-build/targets/linux-${{ matrix.arch }}/artifacts
+          arch: ${{ matrix.arch }}
