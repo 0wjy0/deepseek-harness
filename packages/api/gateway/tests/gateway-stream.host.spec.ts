@@ -888,7 +888,9 @@ describe('Typert Remote streams', () => {
     })
     const ping = once(socket, 'ping')
     await once(socket, 'open')
-    expect((await ping)[0]).toEqual(Buffer.alloc(0))
+    // Non-empty by design: an empty payload tears the socket down on the
+    // packaged Electron runtime on Linux ARM64 (stablyai/orca#23398).
+    expect((await ping)[0]).toEqual(Buffer.from([0]))
 
     socket.close()
     await once(socket, 'close')

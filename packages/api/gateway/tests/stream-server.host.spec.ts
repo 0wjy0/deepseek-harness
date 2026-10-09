@@ -27,7 +27,7 @@ afterEach(async () => {
 })
 
 describe('Remote stream mux server carrier lifecycle', () => {
-  it('sends WebSocket Ping control frames without application messages', async () => {
+  it('sends WebSocket Ping control frames with a non-empty payload and no application messages', async () => {
     const entry = await startMux(async (_endpoint, _payload, _uplink, _peer, control) => waitForAbort(control.signal), 20)
     const client = await connect(entry.url)
     const serverSocket = acceptedSocket(entry.mux)
@@ -36,8 +36,11 @@ describe('Remote stream mux server carrier lifecycle', () => {
 
     const ping = once(client, 'ping')
     const pong = once(serverSocket, 'pong')
-    expect((await ping)[0]).toEqual(Buffer.alloc(0))
-    expect((await pong)[0]).toEqual(Buffer.alloc(0))
+    // An empty payload is what tears the socket down on the packaged Electron
+    // runtime on Linux ARM64 (stablyai/orca#23398); the payload must stay
+    // non-empty, and the auto-pong echoes it back.
+    expect((await ping)[0]).toEqual(Buffer.from([0]))
+    expect((await pong)[0]).toEqual(Buffer.from([0]))
     expect(messages).not.toHaveBeenCalled()
 
     const closingPing = vi.spyOn(serverSocket, 'ping')

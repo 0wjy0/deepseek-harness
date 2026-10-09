@@ -39,6 +39,16 @@ export type RemoteStreamFailureMapper = (error: unknown) => RemoteStreamFailure
 
 const MAX_MISSED_HEARTBEATS = 2
 
+/**
+ * Payload for outgoing heartbeat Ping frames. Intentionally one byte, never
+ * empty: `ws` writes an empty ping as two socket writes (frame header, then a
+ * zero-length payload), and the packaged Electron runtime on Linux ARM64
+ * rejects that trailing zero-length write with EFAULT. The socket then dies on
+ * the first heartbeat — the client's reconnect/success loop. One padding byte
+ * keeps the frame a single write. See stablyai/orca#23398.
+ */
+const PING_PAYLOAD = Buffer.from([0])
+
 /** Own the no-server WebSocket acceptor and every active logical stream. */
 export class RemoteStreamMuxServer {
   private readonly server = new WebSocketServer({ noServer: true })
@@ -117,7 +127,10 @@ export class RemoteStreamMuxServer {
           continue
         }
         this.missedHeartbeats.set(socket, missed + 1)
-        socket.ping()
+        // The non-empty payload is load-bearing, not decoration — see
+        // PING_PAYLOAD. An empty ping tears the socket down on the packaged
+        // Electron runtime on Linux ARM64 (stablyai/orca#23398).
+        socket.ping(PING_PAYLOAD)
       }
     }, this.heartbeatIntervalMs)
     this.heartbeatTimer.unref()
